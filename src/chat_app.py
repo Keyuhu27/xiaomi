@@ -10,7 +10,6 @@
     - 最近 7 天哪个型号卖得最好？
 """
 import os
-from datetime import date
 
 import streamlit as st
 from anthropic import Anthropic
@@ -24,12 +23,18 @@ load_dotenv()
 # 需要更省钱可以换成更便宜的型号，比如 claude-haiku-4-5-20251001
 MODEL = "claude-sonnet-5"
 
-SYSTEM_PROMPT = """你是一个销量数据分析助手，帮助用户查询和分析本地 DuckDB 数据库里的京东商智每日销量数据。
-数据库里只有一张表 sales，字段见 run_sql 工具描述。
+SYSTEM_PROMPT = """你是一个销量数据分析助手，帮助用户查询和分析本地 DuckDB 数据库里的京东商智数据。
+数据库里有 4 张表，对应 4 类不同的京东商智报表，字段和口径的详细说明见 run_sql 工具描述，
+关键区别：
+- sku_daily：全量商品每日销量快照，回答"今天/某天卖了多少"优先查这张表。
+- funnel_daily：重点新品（Turbo 系列等）的渠道级流量转化数据。
+- keyword_brand_weekly / keyword_sku_rank_weekly：行业关键词竞对监控，周度，数值多是脱敏区间的
+  估算值（字段名带 _est），不是精确数字，涉及这两张表的数字要提醒用户这是估算。
 
 回答问题时：
-- 涉及"今天/某天数据是否有异常"类问题，优先调用 check_anomalies 工具，而不是自己临时写统计 SQL。
-- 其它问题（查销量、查销售额、排名、趋势对比等）用 run_sql 工具查询。
+- 涉及"今天/某天数据是否有异常"类问题，优先调用 check_anomalies 工具，而不是自己临时写统计 SQL
+  （这个工具基于 sku_daily 表）。
+- 其它问题（查销量、查销售额、排名、趋势对比等）用 run_sql 工具查询，先想清楚该查哪张表。
 - 用简洁的中文回答，给出具体数字，不要只给结论不给数据支撑。
 - 如果查不到数据（比如当天还没导入），直接说明，不要编造数字。
 """
@@ -45,24 +50,27 @@ if not api_key:
 client = Anthropic(api_key=api_key)
 
 with st.sidebar:
-    st.subheader("今日概览")
+    st.subheader("今日概览（sku_daily）")
     con = get_connection(read_only=True)
     try:
-        today = date.today()
-        row = con.execute(
-            "SELECT COUNT(DISTINCT sku_id), SUM(sales_qty), SUM(sales_amount) "
-            "FROM sales WHERE date = ?",
-            [today],
-        ).fetchone()
+        latest_date = con.execute("SELECT MAX(sales_date) FROM sku_daily").fetchone()[0]
+        row = None
+        if latest_date:
+            # rdc='全国' 是京东商智已经算好的全国汇总行，不能再对全表 SUM（会和区域拆分行重复计数）
+            row = con.execute(
+                "SELECT COUNT(DISTINCT sku_id), SUM(sales_qty) FROM sku_daily "
+                "WHERE sales_date = ? AND rdc = '全国'",
+                [latest_date],
+            ).fetchone()
     finally:
         con.close()
 
     if row and row[0]:
-        st.metric("在售型号数", row[0])
-        st.metric("总销量", int(row[1] or 0))
-        st.metric("总销售额", f"¥{row[2]:,.0f}" if row[2] else "¥0")
+        st.caption(f"最新销售日期：{latest_date}")
+        st.metric("在售 SKU 数", row[0])
+        st.metric("总销量（件）", int(row[1] or 0))
     else:
-        st.info("今天还没有导入数据。把导出的报表放进 data/inbox/，然后运行：\n\npython src/import_data.py")
+        st.info("还没有导入数据。把京东商智相关的 Excel 模板放进 data/inbox/，然后运行：\n\npython src/import_data.py")
 
 if "api_messages" not in st.session_state:
     st.session_state.api_messages = []  # 传给 Claude API 的完整历史（含工具调用）

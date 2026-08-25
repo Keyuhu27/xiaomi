@@ -13,11 +13,41 @@ TOOLS = [
     {
         "name": "run_sql",
         "description": (
-            "在本地销量数据库（DuckDB）上执行一条只读 SQL 查询（SELECT / WITH），返回结果。"
-            "唯一的表是 sales，字段：date (DATE), sku_id, product_name, model, category, "
-            "sales_qty (销量/件数), sales_amount (销售额), visitors (访客数), "
-            "conversion_rate (转化率), source_file。"
-            "一个 sku_id 在同一个 date 只有一行。按型号/商品名称模糊匹配时用 ILIKE '%关键词%'。"
+            "在本地数据库（DuckDB）上执行一条只读 SQL 查询（SELECT / WITH），返回结果。"
+            "数据库里有 4 张表，对应京东商智 4 类不同的报表（口径不同，不要混用）：\n"
+            "\n"
+            "1) sku_daily —— 全量商品每日库存/销量快照，覆盖所有 SKU，回答"
+            "'今天/某天某型号卖了多少'优先查这张表。"
+            "字段：sales_date(实际销售日期), snapshot_date(导出快照日期), sku_id, product_name, "
+            "brand, category_l1/l2/l3, store_name, rdc/distribution_center(区域配送中心/配送"
+            "中心), shelf_status, price, stock_qty(库存件数), available_stock(可用库存), "
+            "sales_qty(当天销量/出库件数), sales_qty_7d/14d/28d/30d(对应天数的滚动累计销量，不是"
+            "单日数据)。同一个 sku_id 在同一个 sales_date 会按 rdc 拆成多行：rdc='全国' 是京东"
+            "商智已经算好的全国汇总（一个 sku_id 一天只有一行），其余 rdc=具体城市名的是区域拆分"
+            "明细，两者相加会重复计数。查'某型号今天卖了多少'这类总量问题，只查 rdc='全国' 的行"
+            "即可，不要对全表 SUM；只有明确要看分城市的区域明细时才用 rdc != '全国' 的行。\n"
+            "\n"
+            "2) funnel_daily —— 重点新品（如 Redmi Turbo 系列）的每日全链路流量转化数据，"
+            "按产品系列(series_code)和渠道(channel_l1/channel_l2)细分，channel_l2 为空的行是该"
+            "一级渠道的汇总行。字段：date, series_code, channel_l1, channel_l2, pv(浏览量), "
+            "uv(访客数), uv_value, aov(客单价), add_cart_customers(加购), order_customers(下单), "
+            "order_amount(下单金额), paying_customers(成交客户数), conversion_rate(成交转化率), "
+            "sales_amount(成交金额), sales_qty(成交子单量=销量)，以及对应的 *_yoy 同比字段"
+            "（不是所有行都有同比数据）。还有 is_launch_4h/28h/3d/7d/30d 等布尔字段，标记这一天"
+            "是否在首销后对应时间窗口内。\n"
+            "\n"
+            "3) keyword_brand_weekly —— 行业关键词/品牌词条竞对监控，周度数据，覆盖全行业"
+            "（不只是自家）。字段：week_date, spu, brand, keyword(关键词), rank(排名), "
+            "以及 search_users/search_count/click_users/click_count/sales_amount/sales_qty/"
+            "conversion_rate 各自的 _raw（原始区间文本，如'10万~25万'）和 _est（区间中点估算"
+            "数值，用于排序/趋势分析，不是精确值，回答时要说明是估算）。\n"
+            "\n"
+            "4) keyword_sku_rank_weekly —— 关键词/型号下的商品排名竞对监控（含自家和竞品"
+            "SKU），周度数据。字段：week_date, spu(型号分类), rank(排名), sku_id, product_info"
+            "(商品全名), brand_name, 以及 click_users/click_count/sales_qty/sales_amount 的 "
+            "_raw/_est 字段（同上，_est 是区间估算值）。\n"
+            "\n"
+            "按型号/商品名称模糊匹配时用 ILIKE '%关键词%'。"
         ),
         "input_schema": {
             "type": "object",
@@ -30,8 +60,9 @@ TOOLS = [
     {
         "name": "check_anomalies",
         "description": (
-            "检测某一天相对过去若干天的销量异常波动（基于历史均值/标准差的 z-score）。"
-            "涉及'今天数据是否异常/有没有问题'这类问题时，优先用这个工具，而不是自己写统计 SQL。"
+            "基于 sku_daily 表，检测某一天相对过去若干天的销量异常波动（基于历史均值/标准差的 "
+            "z-score）。涉及'今天数据是否异常/有没有问题'这类问题时，优先用这个工具，而不是自己写"
+            "统计 SQL。"
         ),
         "input_schema": {
             "type": "object",
