@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 数据库文件和每日导出的原始报表都是本地数据，不进仓库
+data/*.duckdb
+data/inbox/*
+!data/inbox/.gitkeep
