@@ -13,11 +13,16 @@ DuckDB 连接与建表。
                             脱敏区间估算值）
   - keyword_sku_rank_weekly   关键词/型号下的商品排名竞对监控（周度，同上）
 """
+import os
 from pathlib import Path
 
 import duckdb
 
-DB_PATH = Path(__file__).resolve().parent.parent / "data" / "sales.duckdb"
+# 本地开发默认用仓库里的 data/ 目录；部署到 Railway 时把 DATA_DIR 环境变量
+# 指向挂载的持久化 volume（比如 /data），这样数据库文件不会在每次重新部署
+# 时被清空。
+DATA_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).resolve().parent.parent / "data"))
+DB_PATH = DATA_DIR / "sales.duckdb"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sku_daily (

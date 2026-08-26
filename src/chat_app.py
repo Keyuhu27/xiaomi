@@ -1,13 +1,16 @@
 """
-本地聊天/看板界面。
+聊天/看板界面。本地跑，或者部署到 Railway 这类平台上都可以用。
 
-启动方式：
+本地启动方式：
     streamlit run src/chat_app.py
 
 在浏览器里用自然语言问销量数据库问题，比如：
     - 今天 Redmi K80 的销量是多少？
     - 今天数据有没有异常？
     - 最近 7 天哪个型号卖得最好？
+
+数据更新：在左侧"数据导入"里直接上传京东商智相关的 Excel 文件即可，不需要
+命令行（部署到 Railway 后没有本地文件系统可放 data/inbox/，只能这样传）。
 """
 import os
 
@@ -16,6 +19,7 @@ from anthropic import Anthropic
 from dotenv import load_dotenv
 
 from db import get_connection
+from import_data import import_workbook
 from tools import TOOLS, dispatch
 
 load_dotenv()
@@ -40,16 +44,74 @@ SYSTEM_PROMPT = """你是一个销量数据分析助手，帮助用户查询和�
 """
 
 st.set_page_config(page_title="销量数据助手", page_icon="📊")
+
+
+def _check_password() -> bool:
+    """
+    简单的共享密码门：设置了 APP_PASSWORD 环境变量才会启用。部署到 Railway
+    之类的公网环境时务必设置这个变量，不然任何拿到 URL 的人都能进来问数据、
+    消耗你的 Claude API 额度。本地开发不设置这个变量就不会要求输入密码。
+    """
+    app_password = os.environ.get("APP_PASSWORD")
+    if not app_password:
+        return True
+    if st.session_state.get("authenticated"):
+        return True
+
+    st.title("📊 销量数据助手")
+    pwd = st.text_input("请输入访问密码", type="password")
+    if pwd:
+        if pwd == app_password:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("密码不对")
+    return False
+
+
+if not _check_password():
+    st.stop()
+
 st.title("📊 销量数据助手")
 
 api_key = os.environ.get("ANTHROPIC_API_KEY")
 if not api_key:
-    st.error("没有找到 ANTHROPIC_API_KEY，请复制 .env.example 为 .env 并填入你的 key，然后重启。")
+    st.error("没有找到 ANTHROPIC_API_KEY，请配置这个环境变量后重启（本地开发可以复制 .env.example 为 .env）。")
     st.stop()
 
 client = Anthropic(api_key=api_key)
 
 with st.sidebar:
+    st.subheader("数据导入")
+    uploaded_files = st.file_uploader(
+        "把京东商智相关的 Excel 文件拖到这里（可一次选多个）",
+        type=["xlsx", "xls"],
+        accept_multiple_files=True,
+    )
+    with st.expander("高级选项"):
+        series_code_override = st.text_input(
+            "强制指定系列代号（如 O10U）",
+            value="",
+            help=(
+                "只有单独重新导出某个系列部分时间的修正文件、sheet 名不是"
+                "'数据源XXX'格式时才需要填；正常的完整模板文件留空即可"
+            ),
+        ).strip() or None
+
+    if uploaded_files and st.button("开始导入", type="primary"):
+        for f in uploaded_files:
+            with st.spinner(f"正在导入 {f.name} ..."):
+                try:
+                    summary = import_workbook(f, source_name=f.name, series_code_override=series_code_override)
+                    if summary:
+                        for sheet_name, report_type, n in summary:
+                            st.success(f"{f.name} / {sheet_name} → {report_type}：{n} 行")
+                    else:
+                        st.warning(f"{f.name} 里没有识别出已知的报表类型（汇总/透视表 sheet 会被跳过）")
+                except Exception as e:
+                    st.error(f"{f.name} 导入失败：{e}")
+
+    st.divider()
     st.subheader("今日概览（sku_daily）")
     con = get_connection(read_only=True)
     try:
@@ -70,7 +132,7 @@ with st.sidebar:
         st.metric("在售 SKU 数", row[0])
         st.metric("总销量（件）", int(row[1] or 0))
     else:
-        st.info("还没有导入数据。把京东商智相关的 Excel 模板放进 data/inbox/，然后运行：\n\npython src/import_data.py")
+        st.info("还没有导入数据，用上面的\"数据导入\"上传一份京东商智相关的 Excel 文件试试。")
 
 if "api_messages" not in st.session_state:
     st.session_state.api_messages = []  # 传给 Claude API 的完整历史（含工具调用）

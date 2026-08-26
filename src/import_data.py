@@ -22,10 +22,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from db import get_connection
+from db import DATA_DIR, get_connection
 from parsing import parse_range_estimate, to_bool_cn, to_date, to_float, to_id_str, to_int, to_text
 
-INBOX_DIR = Path(__file__).resolve().parent.parent / "data" / "inbox"
+INBOX_DIR = DATA_DIR / "inbox"
 PROCESSED_DIR = INBOX_DIR / "processed"
 
 # 每种报表用哪些列做"整体替换"的分区键：重新导入时，先删掉这些列取值都
@@ -334,13 +334,23 @@ def write_table(con, table: str, df: pd.DataFrame, partition_cols):
             raise
 
 
-def import_workbook(path: Path, series_code_override: str | None = None):
+def import_workbook(file, source_name: str | None = None, series_code_override: str | None = None):
+    """
+    file: 本地文件路径（Path/str），或者任何 pandas 能读的文件对象（比如
+    Streamlit st.file_uploader 返回的上传文件、BytesIO）——网页版"上传数据"
+    功能就是靠这个支持上传文件直接导入，不用先落到 data/inbox/ 目录。
+    source_name: 记录进 source_file 字段、日志打印用的文件名；传本地路径时
+    可以不传，自动取文件名，上传文件场景必须传（比如 uploaded_file.name）。
+    """
+    if source_name is None:
+        source_name = Path(file).name
+
     # 注意：这里用 pandas.read_excel（底层还是 openpyxl）而不是直接用
     # openpyxl 的 read_only 流式模式读取。实测发现部分京东商智导出的 xlsx
     # （尤其是单独重新导出的报表，不是完整模板文件）在 openpyxl 的
     # read_only 模式下会把表头读错（实测只读出第一列），pandas 这条路径
     # 没有这个问题，速度也足够（10万行级别的 sheet 在 20~30 秒内）。
-    xl = pd.ExcelFile(path, engine="openpyxl")
+    xl = pd.ExcelFile(file, engine="openpyxl")
     con = get_connection()
     summary = []
     try:
@@ -356,9 +366,9 @@ def import_workbook(path: Path, series_code_override: str | None = None):
             rows_iter = full_df.itertuples(index=False, name=None)
 
             if report_type == "funnel_daily":
-                df = load_funnel_daily(header, rows_iter, sheet_name, path.name, series_code_override)
+                df = load_funnel_daily(header, rows_iter, sheet_name, source_name, series_code_override)
             else:
-                df = LOADERS[report_type](header, rows_iter, sheet_name, path.name)
+                df = LOADERS[report_type](header, rows_iter, sheet_name, source_name)
             if df is None or df.empty:
                 continue
 
@@ -369,7 +379,7 @@ def import_workbook(path: Path, series_code_override: str | None = None):
         con.close()
 
     if not summary:
-        print(f"  [提示] {path.name} 里没有识别出任何已知的数据源 sheet（可能都是汇总/透视表，已跳过）")
+        print(f"  [提示] {source_name} 里没有识别出任何已知的数据源 sheet（可能都是汇总/透视表，已跳过）")
     return summary
 
 

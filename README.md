@@ -6,7 +6,8 @@
 - "今天数据有没有异常？"
 - "最近 7 天 Turbo 系列哪个渠道转化最好？"
 
-只在本机使用，不需要服务器，不需要公网访问。
+可以在自己电脑本地跑，也可以部署到 Railway 这类平台上（公司电脑装不了本地环境
+时用这个），部署方式见下面"部署到 Railway"一节。
 
 ## 数据库里有什么（重要，务必先看）
 
@@ -66,7 +67,10 @@ src/
   import_data.py     # 打开 Excel，逐个 sheet 识别报表类型，导入对应的表
   anomaly.py         # 异常检测口径（基于 sku_daily 的滚动均值/标准差）
   tools.py           # 提供给 Claude 的工具（run_sql / check_anomalies）
-  chat_app.py         # Streamlit 聊天 + 今日看板
+  chat_app.py         # Streamlit 聊天 + 今日看板 + 网页版数据导入
+Procfile              # Railway/类 Heroku 平台的启动命令
+railway.json          # Railway 部署配置（构建方式、启动命令）
+.python-version       # 指定 Python 3.11，Railway 构建时会读取
 ```
 
 ## 首次安装
@@ -92,17 +96,21 @@ src/
 
 1. 跟你原来的习惯一样，把当天从京东商智下载的新数据更新进 Excel 模板（对应模板里的
    "数据源xxx" sheet）。
-2. 把整份模板文件拖进 `data/inbox/` 文件夹。
-3. 运行导入脚本：
+2. 导入数据，两种方式任选一种（部署到 Railway 后只能用方式 A，因为没有本地文件系统）：
 
-   ```bash
-   python src/import_data.py
-   ```
+   - **方式 A：网页里直接上传**（推荐，本地/部署都能用）——打开聊天界面，左侧"数据导入"
+     里把 Excel 文件拖进去，点"开始导入"。
+   - **方式 B：命令行**（只适合本地）——把文件拖进 `data/inbox/` 文件夹，运行：
 
-   脚本会打开文件、逐个 sheet 自动识别是上面 4 类报表的哪一种（认不出的汇总/透视表
-   sheet 会跳过），分别导入对应的表。导入完的文件会被移到 `data/inbox/processed/`。
-   重复导入同一天/同一系列/同一份文件的数据会被整体替换，不会产生重复行——具体按哪个
-   字段去重见下表：
+     ```bash
+     python src/import_data.py
+     ```
+
+     导入完的文件会被移到 `data/inbox/processed/`。
+
+   不管哪种方式，脚本都会打开文件、逐个 sheet 自动识别是上面 4 类报表的哪一种（认不出的
+   汇总/透视表 sheet 会跳过），分别导入对应的表。重复导入同一天/同一系列/同一份文件的
+   数据会被整体替换，不会产生重复行——具体按哪个字段去重见下表：
 
    | 表 | 去重方式 |
    |---|---|
@@ -111,18 +119,45 @@ src/
    | keyword_brand_weekly / keyword_sku_rank_weekly | 按来源文件名整体替换 |
 
    funnel_daily 的 `series_code` 默认从 sheet 名推断（"数据源O10U" -> `O10U`）；如果是
-   单独重新导出的修正文件、sheet 名不是这个格式，用 `--series-code` 手动指定，见上面
-   "已修复"那节的例子。
+   单独重新导出的修正文件、sheet 名不是这个格式，网页版在"数据导入"的"高级选项"里填，
+   命令行版用 `--series-code` 参数，见上面"已修复"那节的例子。
 
-4. 打开聊天界面：
+3. 打开聊天界面（本地）：
 
    ```bash
    streamlit run src/chat_app.py
    ```
 
-   浏览器会自动打开一个本地网页，左侧是最新一天的销量概览，中间可以直接用中文提问。
+   浏览器会自动打开一个网页，左侧是数据导入入口和最新一天的销量概览，中间可以直接用
+   中文提问。部署到 Railway 后就是打开 Railway 给的那个网址。
 
-Windows 用户也可以直接双击 `run.bat`（首次会自动建虚拟环境、装依赖），Mac 用户双击 `run.command`。
+Windows 用户本地跑也可以直接双击 `run.bat`（首次会自动建虚拟环境、装依赖），Mac 用户双击 `run.command`。
+
+## 部署到 Railway
+
+公司电脑装不了本地 Python 环境、或者想随时随地（不只是自己电脑）打开聊天界面时用这个。
+数据库还是同一个 DuckDB，只是换成跑在 Railway 上；每天的数据靠上面"方式 A：网页里直接
+上传"更新，不需要 SSH 到服务器。
+
+1. **确认代码已经推到 GitHub**（这个仓库就是，用哪个分支部署都行，比如当前分支或者合并到
+   `main`）。
+2. 登录 [railway.app](https://railway.app)，**New Project → Deploy from GitHub repo**，
+   选这个仓库。Railway 会自动识别出是 Python 项目（靠 `requirements.txt`），并且这个仓库
+   根目录已经放了 `railway.json`（指定了启动命令）和 `.python-version`（指定 Python
+   3.11），不需要手动配置构建/启动命令。
+3. 部署出来的服务里，进 **Variables**（环境变量）标签页，添加：
+   - `ANTHROPIC_API_KEY`：你的 Claude API key。
+   - `APP_PASSWORD`：给这个网页设一个访问密码（**强烈建议设置**——不设的话，任何拿到
+     Railway 给的公网 URL 的人都能进来问你的数据、消耗你的 API 额度）。
+   - `DATA_DIR`：设成 `/data`（配合下一步的持久化 volume，不然每次重新部署数据库都会被
+     清空）。
+4. 给这个服务加一个 **Volume**（持久化存储），挂载路径填 `/data`（要和上面 `DATA_DIR`
+   一致）。Railway 的 Volume 功能在服务详情页的 "Settings" → "Volumes" 里。
+5. 等部署完成，打开 Railway 给的域名（在服务详情页的 "Settings" → "Networking" 里，如果
+   没有默认域名要手动点一下 "Generate Domain"）。第一次打开先输入你设的 `APP_PASSWORD`，
+   然后照日常流程在"数据导入"里传第一份数据。
+
+以后每天更新数据，就是打开这个 Railway 网址、上传当天更新好的 Excel、然后照常提问。
 
 ## 关于异常检测
 
