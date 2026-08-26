@@ -20,22 +20,24 @@ import argparse
 from datetime import timedelta
 from pathlib import Path
 
-import openpyxl
 import pandas as pd
 
 from db import get_connection
-from parsing import parse_range_estimate, to_bool_cn, to_date, to_float, to_int
+from parsing import parse_range_estimate, to_bool_cn, to_date, to_float, to_id_str, to_int, to_text
 
 INBOX_DIR = Path(__file__).resolve().parent.parent / "data" / "inbox"
 PROCESSED_DIR = INBOX_DIR / "processed"
 
-# 每种报表用哪一列做"整体替换"的分区键：重新导入时，先删掉这一列取值相同
-# 的旧数据，再整体插入新数据，这样同一份数据重复导入不会重复计数。
+# 每种报表用哪些列做"整体替换"的分区键：重新导入时，先删掉这些列取值都
+# 相同的旧数据，再整体插入新数据，这样同一份数据重复导入不会重复计数。
+# funnel_daily 用 (series_code, date) 而不是只用 series_code：这样不管是
+# 重新导出某个系列的完整历史，还是只补传某一段时间的修正数据，都只会替换
+# 文件里实际包含的那些日期，不会把该系列其它日期的历史数据一并删掉。
 PARTITION_COL = {
-    "funnel_daily": "series_code",       # 按产品系列整体替换
-    "sku_daily": "sales_date",           # 按销售日期整体替换
-    "keyword_brand_weekly": "source_file",      # 按来源文件整体替换
-    "keyword_sku_rank_weekly": "source_file",
+    "funnel_daily": ["series_code", "date"],
+    "sku_daily": ["sales_date"],                # 按销售日期整体替换
+    "keyword_brand_weekly": ["source_file"],    # 按来源文件整体替换
+    "keyword_sku_rank_weekly": ["source_file"],
 }
 
 # 各指标的"成交子单量"等字段是整数、还是比率/金额这种浮点数
@@ -64,7 +66,13 @@ _FUNNEL_METRIC_FIELDS = {
 
 
 def _raw(v):
-    return None if v is None else str(v)
+    """保留原始文本，但把 pandas 读表格时整列被转成 float 导致的'8073.0'这种
+    尾巴清理掉，恢复成'8073'（不影响真正的区间文本，如'10万~25万'本来就是字符串）。"""
+    if v is None or (isinstance(v, float) and v != v):  # v != v 即 NaN
+        return None
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
 
 
 def detect_report_type(header: list) -> str | None:
@@ -80,29 +88,66 @@ def detect_report_type(header: list) -> str | None:
     return None
 
 
+def _is_yoy_col(name) -> bool:
+    """判断某一列是不是'同比'列。pandas 读表格遇到重复列名会自动改成
+    '同比.1'/'同比.2'……这类后缀去重，所以不能只判断严格等于'同比'。"""
+    return isinstance(name, str) and (name == "同比" or name.startswith("同比."))
+
+
 def _funnel_metric_positions(header: list):
     """把每个指标列和紧跟其后的'同比'列配对，返回 [(db字段名, 指标列idx, 同比列idx或None), ...]。"""
     pairs = []
     for cn_name, field in _FUNNEL_METRIC_FIELDS.items():
         idx = header.index(cn_name)
-        yoy_idx = idx + 1 if idx + 1 < len(header) and header[idx + 1] == "同比" else None
+        yoy_idx = idx + 1 if idx + 1 < len(header) and _is_yoy_col(header[idx + 1]) else None
         pairs.append((field, idx, yoy_idx))
     return pairs
 
 
-def load_funnel_daily(header, rows_iter, sheet_name, source_file):
-    names = [
-        "日期", "一级渠道", "二级渠道", "聚合来源", "核心节点", "周报周", "周会周",
-        "是否近7天", "是否近14天", "预约期", "首销4小时", "首销28小时", "首销3天", "首销7天", "首销30天",
-    ]
+_FUNNEL_OPTIONAL_FLAG_COLS = {
+    "week_report": "周报周",
+    "week_meeting": "周会周",
+    "traffic_source": "聚合来源",
+    "core_node": "核心节点",
+    "is_last_7d": "是否近7天",
+    "is_last_14d": "是否近14天",
+    "is_reservation_period": "预约期",
+    "is_launch_4h": "首销4小时",
+    "is_launch_28h": "首销28小时",
+    "is_launch_3d": "首销3天",
+    "is_launch_7d": "首销7天",
+    "is_launch_30d": "首销30天",
+}
+_FUNNEL_BOOL_FIELDS = {
+    "is_last_7d", "is_last_14d", "is_reservation_period",
+    "is_launch_4h", "is_launch_28h", "is_launch_3d", "is_launch_7d", "is_launch_30d",
+}
+
+
+def load_funnel_daily(header, rows_iter, sheet_name, source_file, series_code_override=None):
+    """
+    京东商智不同报表页面导出的"数据源"列不完全一样：完整的模板 sheet（如
+    "数据源O10U"）会带 周报周/核心节点/首销Nx 等上下文列；单独重新导出某段
+    时间的"流量来源"报表通常只有 日期/一级渠道/二级渠道 + 各项指标，没有这些
+    上下文列。这里只要求日期+渠道+指标列，其余上下文列缺失就存 None/False，
+    不因为缺列就放弃整个 sheet。
+    """
+    required_names = ["日期", "一级渠道", "二级渠道"]
     try:
-        idx = {name: header.index(name) for name in names}
+        idx = {name: header.index(name) for name in required_names}
         metric_positions = _funnel_metric_positions(header)
     except ValueError as e:
         print(f"  [跳过] sheet '{sheet_name}' 缺少必要列: {e}")
         return None
 
-    series_code = sheet_name[len("数据源"):] if sheet_name.startswith("数据源") else sheet_name
+    optional_idx = {field: header.index(cn) for field, cn in _FUNNEL_OPTIONAL_FLAG_COLS.items() if cn in header}
+
+    if series_code_override:
+        series_code = series_code_override
+    elif sheet_name.startswith("数据源"):
+        series_code = sheet_name[len("数据源"):]
+    else:
+        series_code = sheet_name
 
     records = []
     for row in rows_iter:
@@ -112,22 +157,17 @@ def load_funnel_daily(header, rows_iter, sheet_name, source_file):
         rec = {
             "date": d,
             "series_code": series_code,
-            "week_report": row[idx["周报周"]],
-            "week_meeting": row[idx["周会周"]],
-            "traffic_source": row[idx["聚合来源"]],
-            "core_node": row[idx["核心节点"]],
-            "is_last_7d": to_bool_cn(row[idx["是否近7天"]]),
-            "is_last_14d": to_bool_cn(row[idx["是否近14天"]]),
-            "is_reservation_period": to_bool_cn(row[idx["预约期"]]),
-            "is_launch_4h": to_bool_cn(row[idx["首销4小时"]]),
-            "is_launch_28h": to_bool_cn(row[idx["首销28小时"]]),
-            "is_launch_3d": to_bool_cn(row[idx["首销3天"]]),
-            "is_launch_7d": to_bool_cn(row[idx["首销7天"]]),
-            "is_launch_30d": to_bool_cn(row[idx["首销30天"]]),
-            "channel_l1": row[idx["一级渠道"]],
-            "channel_l2": row[idx["二级渠道"]],
+            "channel_l1": to_text(row[idx["一级渠道"]]),
+            "channel_l2": to_text(row[idx["二级渠道"]]),
             "source_file": source_file,
         }
+        for field, cn in _FUNNEL_OPTIONAL_FLAG_COLS.items():
+            if field not in optional_idx:
+                rec[field] = None
+            elif field in _FUNNEL_BOOL_FIELDS:
+                rec[field] = to_bool_cn(row[optional_idx[field]])
+            else:
+                rec[field] = to_text(row[optional_idx[field]])
         for field, midx, yidx in metric_positions:
             raw = row[midx]
             rec[field] = to_int(raw) if field in _FUNNEL_INT_METRICS else to_float(raw)
@@ -152,22 +192,22 @@ def load_sku_daily(header, rows_iter, sheet_name, source_file):
     records = []
     for row in rows_iter:
         snapshot_date = to_date(row[idx["时间"]])
-        sku_id = row[idx["SKU"]]
+        sku_id = to_id_str(row[idx["SKU"]])
         if snapshot_date is None or sku_id is None:
             continue
         records.append({
             "snapshot_date": snapshot_date,
             "sales_date": snapshot_date - timedelta(days=1),
-            "sku_id": str(sku_id).strip(),
-            "product_name": row[idx["商品名称"]],
-            "brand": row[idx["品牌"]],
-            "category_l1": row[idx["一级类目"]],
-            "category_l2": row[idx["二级类目"]],
-            "category_l3": row[idx["三级类目"]],
-            "store_name": row[idx["店铺名称"]],
-            "rdc": row[idx["RDC"]],
-            "distribution_center": row[idx["配送中心"]],
-            "shelf_status": row[idx["上下柜状态"]],
+            "sku_id": sku_id,
+            "product_name": to_text(row[idx["商品名称"]]),
+            "brand": to_text(row[idx["品牌"]]),
+            "category_l1": to_text(row[idx["一级类目"]]),
+            "category_l2": to_text(row[idx["二级类目"]]),
+            "category_l3": to_text(row[idx["三级类目"]]),
+            "store_name": to_text(row[idx["店铺名称"]]),
+            "rdc": to_text(row[idx["RDC"]]),
+            "distribution_center": to_text(row[idx["配送中心"]]),
+            "shelf_status": to_text(row[idx["上下柜状态"]]),
             "price": to_float(row[idx["商品价格"]]),
             "stock_qty": to_int(row[idx["库存件数"]]),
             "available_stock": to_int(row[idx["可用库存"]]),
@@ -200,16 +240,16 @@ def load_keyword_brand_weekly(header, rows_iter, sheet_name, source_file):
             continue
         records.append({
             "week_date": week_date,
-            "year": row[idx["年"]],
-            "month": row[idx["月"]],
-            "week": row[idx["周"]],
-            "spu": row[idx["SPU"]],
-            "entry_type": row[idx["词条性质"]],
-            "brand": row[idx["品牌"]],
-            "sub_brand": row[idx["子品牌"]],
+            "year": to_text(row[idx["年"]]),
+            "month": to_text(row[idx["月"]]),
+            "week": to_text(row[idx["周"]]),
+            "spu": to_text(row[idx["SPU"]]),
+            "entry_type": to_text(row[idx["词条性质"]]),
+            "brand": to_text(row[idx["品牌"]]),
+            "sub_brand": to_text(row[idx["子品牌"]]),
             "is_last_14d": to_bool_cn(row[idx["是否近14天"]]),
             "rank": to_int(row[idx["排名"]]),
-            "keyword": row[idx["关键词"]],
+            "keyword": to_text(row[idx["关键词"]]),
             "search_users_raw": _raw(row[idx["搜索人数"]]), "search_users_est": parse_range_estimate(row[idx["搜索人数"]]),
             "search_count_raw": _raw(row[idx["搜索次数"]]), "search_count_est": parse_range_estimate(row[idx["搜索次数"]]),
             "click_users_raw": _raw(row[idx["点击人数"]]), "click_users_est": parse_range_estimate(row[idx["点击人数"]]),
@@ -241,21 +281,19 @@ def load_keyword_sku_rank_weekly(header, rows_iter, sheet_name, source_file):
         week_date = to_date(row[idx["时间"]])
         if week_date is None:
             continue
-        sku_id = row[idx["SKUID"]]
-        brand_id = row[idx["品牌ID"]]
         records.append({
             "week_date": week_date,
-            "spu": row[idx["SPU"]],
+            "spu": to_text(row[idx["SPU"]]),
             "is_last_14d_1": to_bool_cn(row[idx["是近14天"]]),
-            "brand": row[idx["品牌"]],
-            "month": row[idx["月"]],
-            "week": row[idx["周"]],
+            "brand": to_text(row[idx["品牌"]]),
+            "month": to_text(row[idx["月"]]),
+            "week": to_text(row[idx["周"]]),
             "is_last_14d_2": to_bool_cn(row[idx["是否近14天"]]),
             "rank": to_int(row[idx["排名"]]),
-            "sku_id": str(sku_id).strip() if sku_id is not None else None,
-            "product_info": row[idx["商品信息"]],
-            "brand_id": str(brand_id) if brand_id is not None else None,
-            "brand_name": row[idx["品牌名称"]],
+            "sku_id": to_id_str(row[idx["SKUID"]]),
+            "product_info": to_text(row[idx["商品信息"]]),
+            "brand_id": to_id_str(row[idx["品牌ID"]]),
+            "brand_name": to_text(row[idx["品牌名称"]]),
             "click_users_raw": _raw(row[idx["点击人数"]]), "click_users_est": parse_range_estimate(row[idx["点击人数"]]),
             "click_count_raw": _raw(row[idx["点击次数"]]), "click_count_est": parse_range_estimate(row[idx["点击次数"]]),
             "sales_qty_raw": _raw(row[idx["成交单量"]]), "sales_qty_est": parse_range_estimate(row[idx["成交单量"]]),
@@ -274,33 +312,53 @@ LOADERS = {
 }
 
 
-def write_table(con, table: str, df: pd.DataFrame, partition_col: str):
-    for pval, group in df.groupby(partition_col):
-        con.execute(f"DELETE FROM {table} WHERE {partition_col} = ?", [pval])
-        con.register("tmp_df", group)
-        cols = ", ".join(group.columns)
-        con.execute(f"INSERT INTO {table} ({cols}) SELECT {cols} FROM tmp_df")
-        con.unregister("tmp_df")
+def write_table(con, table: str, df: pd.DataFrame, partition_cols):
+    if isinstance(partition_cols, str):
+        partition_cols = [partition_cols]
+    where_clause = " AND ".join(f"{c} = ?" for c in partition_cols)
+
+    for pval, group in df.groupby(partition_cols):
+        params = list(pval) if isinstance(pval, tuple) else [pval]
+        # 删除+插入包在一个事务里：插入失败时把删除也一起回滚，不然会把
+        # 这个分区的旧数据删空、新数据又没插进去，表就被清空了。
+        con.execute("BEGIN TRANSACTION")
+        try:
+            con.execute(f"DELETE FROM {table} WHERE {where_clause}", params)
+            con.register("tmp_df", group)
+            cols = ", ".join(group.columns)
+            con.execute(f"INSERT INTO {table} ({cols}) SELECT {cols} FROM tmp_df")
+            con.unregister("tmp_df")
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
 
 
-def import_workbook(path: Path):
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+def import_workbook(path: Path, series_code_override: str | None = None):
+    # 注意：这里用 pandas.read_excel（底层还是 openpyxl）而不是直接用
+    # openpyxl 的 read_only 流式模式读取。实测发现部分京东商智导出的 xlsx
+    # （尤其是单独重新导出的报表，不是完整模板文件）在 openpyxl 的
+    # read_only 模式下会把表头读错（实测只读出第一列），pandas 这条路径
+    # 没有这个问题，速度也足够（10万行级别的 sheet 在 20~30 秒内）。
+    xl = pd.ExcelFile(path, engine="openpyxl")
     con = get_connection()
     summary = []
     try:
-        for sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-            rows_iter = ws.iter_rows(values_only=True)
-            try:
-                header = list(next(rows_iter))
-            except StopIteration:
-                continue
-
+        for sheet_name in xl.sheet_names:
+            header_only = xl.parse(sheet_name, nrows=0)
+            header = list(header_only.columns)
             report_type = detect_report_type(header)
             if report_type is None:
-                continue  # 汇总/透视表之类的辅助 sheet，跳过
+                continue  # 汇总/透视表之类的辅助 sheet，跳过（先只读表头，省得整表解析）
 
-            df = LOADERS[report_type](header, rows_iter, sheet_name, path.name)
+            full_df = xl.parse(sheet_name)
+            header = list(full_df.columns)  # 和上面理论上一致，重新取一次更保险
+            rows_iter = full_df.itertuples(index=False, name=None)
+
+            if report_type == "funnel_daily":
+                df = load_funnel_daily(header, rows_iter, sheet_name, path.name, series_code_override)
+            else:
+                df = LOADERS[report_type](header, rows_iter, sheet_name, path.name)
             if df is None or df.empty:
                 continue
 
@@ -309,7 +367,6 @@ def import_workbook(path: Path):
             print(f"  [完成] sheet '{sheet_name}' -> {report_type}: {len(df)} 行")
     finally:
         con.close()
-        wb.close()
 
     if not summary:
         print(f"  [提示] {path.name} 里没有识别出任何已知的数据源 sheet（可能都是汇总/透视表，已跳过）")
@@ -342,11 +399,19 @@ def process_inbox():
 def main():
     parser = argparse.ArgumentParser(description="导入京东商智相关 Excel 模板数据")
     parser.add_argument("file", nargs="?", help="指定单个文件；不传则处理 data/inbox/ 下所有文件")
+    parser.add_argument(
+        "--series-code",
+        help=(
+            "强制指定这份文件里 funnel_daily 数据的 series_code（如 O10U），"
+            "用于单独重新导出、sheet 名不是'数据源XXX'格式的修正文件；"
+            "只在指定单个文件时有效，处理 inbox 整批文件时不要用这个参数"
+        ),
+    )
     args = parser.parse_args()
 
     if args.file:
         print(f"[处理] {args.file}")
-        import_workbook(Path(args.file))
+        import_workbook(Path(args.file), series_code_override=args.series_code)
     else:
         process_inbox()
 
