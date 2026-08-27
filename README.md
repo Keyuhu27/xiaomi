@@ -9,6 +9,14 @@
 可以在自己电脑本地跑，也可以部署到 Railway 这类平台上（公司电脑装不了本地环境
 时用这个），部署方式见下面"部署到 Railway"一节。
 
+网页是多页面的，左侧导航栏可以切换：
+
+- 💬 **聊天问答**：自然语言问数据库
+- 📦 **销量看板**：sku_daily 的 KPI + 趋势图 + 畅销排行
+- 🚀 **新品转化看板**：funnel_daily（Turbo 系列等）的流量/转化趋势 + 渠道排名
+- 🔍 **关键词竞对** / 🏆 **商品排名竞对**：两张竞对监控表的筛选表格
+- 📤 **数据导入**：上传京东商智相关的 Excel 文件
+
 ## 数据库里有什么（重要，务必先看）
 
 这个数据库**不是一张"销量表"**，而是对应京东商智 4 类完全不同的报表，分别建了 4 张表
@@ -62,12 +70,19 @@ data/
   inbox/          # 每天把更新好的 Excel 文件放这里
   sales.duckdb     # 数据库文件（首次运行自动创建，不进 git）
 src/
+  app.py           # 应用入口：密码门 + 页面导航（streamlit run src/app.py）
+  app_pages/        # 每个导航页面一个文件，函数名统一叫 render()
+    chat_page.py         # 💬 聊天问答
+    sku_dashboard.py      # 📦 销量看板
+    funnel_dashboard.py    # 🚀 新品转化看板
+    keyword_brand_dashboard.py  # 🔍 关键词竞对
+    keyword_rank_dashboard.py   # 🏆 商品排名竞对
+    import_page.py        # 📤 数据导入
   db.py            # DuckDB 连接与建表（4 张表）
   parsing.py        # 小工具：是/否转布尔、脱敏区间转估算数值、安全数字/日期转换
   import_data.py     # 打开 Excel，逐个 sheet 识别报表类型，导入对应的表
   anomaly.py         # 异常检测口径（基于 sku_daily 的滚动均值/标准差）
   tools.py           # 提供给 Claude 的工具（run_sql / check_anomalies）
-  chat_app.py         # Streamlit 聊天 + 今日看板 + 网页版数据导入
 Procfile              # Railway/类 Heroku 平台的启动命令
 railway.json          # Railway 部署配置（构建方式、启动命令）
 .python-version       # 指定 Python 3.11，Railway 构建时会读取
@@ -98,8 +113,8 @@ railway.json          # Railway 部署配置（构建方式、启动命令）
    "数据源xxx" sheet）。
 2. 导入数据，两种方式任选一种（部署到 Railway 后只能用方式 A，因为没有本地文件系统）：
 
-   - **方式 A：网页里直接上传**（推荐，本地/部署都能用）——打开聊天界面，左侧"数据导入"
-     里把 Excel 文件拖进去，点"开始导入"。
+   - **方式 A：网页里直接上传**（推荐，本地/部署都能用）——打开网页，切到左侧导航栏的
+     "📤 数据导入"页面，把 Excel 文件拖进去，点"开始导入"。
    - **方式 B：命令行**（只适合本地）——把文件拖进 `data/inbox/` 文件夹，运行：
 
      ```bash
@@ -119,17 +134,17 @@ railway.json          # Railway 部署配置（构建方式、启动命令）
    | keyword_brand_weekly / keyword_sku_rank_weekly | 按来源文件名整体替换 |
 
    funnel_daily 的 `series_code` 默认从 sheet 名推断（"数据源O10U" -> `O10U`）；如果是
-   单独重新导出的修正文件、sheet 名不是这个格式，网页版在"数据导入"的"高级选项"里填，
-   命令行版用 `--series-code` 参数，见上面"已修复"那节的例子。
+   单独重新导出的修正文件、sheet 名不是这个格式，网页版在"📤 数据导入"页面的"高级选项"
+   里填，命令行版用 `--series-code` 参数，见上面"已修复"那节的例子。
 
-3. 打开聊天界面（本地）：
+3. 打开网页（本地）：
 
    ```bash
-   streamlit run src/chat_app.py
+   streamlit run src/app.py
    ```
 
-   浏览器会自动打开一个网页，左侧是数据导入入口和最新一天的销量概览，中间可以直接用
-   中文提问。部署到 Railway 后就是打开 Railway 给的那个网址。
+   浏览器会自动打开，左侧导航栏可以切换聊天问答/各个看板/数据导入。部署到 Railway 后
+   就是打开 Railway 给的那个网址，导航栏是一样的。
 
 Windows 用户本地跑也可以直接双击 `run.bat`（首次会自动建虚拟环境、装依赖），Mac 用户双击 `run.command`。
 

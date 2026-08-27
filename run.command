@@ -5,4 +5,4 @@ if [ ! -d .venv ]; then
 fi
 source .venv/bin/activate
 pip install -r requirements.txt -q
-streamlit run src/chat_app.py
+streamlit run src/app.py

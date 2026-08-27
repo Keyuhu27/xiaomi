@@ -5,5 +5,5 @@ if not exist .venv (
 )
 call .venv\Scripts\activate
 pip install -r requirements.txt -q
-streamlit run src\chat_app.py
+streamlit run src\app.py
 pause
