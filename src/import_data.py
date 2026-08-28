@@ -8,7 +8,7 @@
 
 这个脚本不是按"文件"识别数据类型，而是打开工作簿后逐个 sheet 检查表头，
 自动识别出 4 种已知的京东商智报表类型（sku_daily / funnel_daily /
-keyword_brand_weekly / keyword_sku_rank_weekly，具体字段含义见 README 和
+keyword_brand_daily / keyword_sku_rank_daily，具体字段含义见 README 和
 src/db.py 里的表结构注释），认不出的 sheet（汇总、透视表之类）会跳过。
 
 日常使用流程：每天把京东商智下载的新数据粘贴进 Excel 模板对应的"数据源"
@@ -33,11 +33,15 @@ PROCESSED_DIR = INBOX_DIR / "processed"
 # funnel_daily 用 (series_code, date) 而不是只用 series_code：这样不管是
 # 重新导出某个系列的完整历史，还是只补传某一段时间的修正数据，都只会替换
 # 文件里实际包含的那些日期，不会把该系列其它日期的历史数据一并删掉。
+# keyword_brand_daily / keyword_sku_rank_daily 同理按 date 分区（这两张表
+# 最初误以为是周度数据、按 source_file 整体替换，后来确认其实是每日数据，
+# 改成按 date 分区更稳妥：以后不管是重新导出全量历史、还是只导出某一天的
+# 增量，都只会替换对应日期的数据）。
 PARTITION_COL = {
     "funnel_daily": ["series_code", "date"],
     "sku_daily": ["sales_date"],                # 按销售日期整体替换
-    "keyword_brand_weekly": ["source_file"],    # 按来源文件整体替换
-    "keyword_sku_rank_weekly": ["source_file"],
+    "keyword_brand_daily": ["date"],
+    "keyword_sku_rank_daily": ["date"],
 }
 
 # 各指标的"成交子单量"等字段是整数、还是比率/金额这种浮点数
@@ -82,9 +86,9 @@ def detect_report_type(header: list) -> str | None:
     if {"SKU", "库存件数", "昨日出库商品件数", "一级类目"} <= hs:
         return "sku_daily"
     if {"关键词", "在线商品数", "搜索人数"} <= hs:
-        return "keyword_brand_weekly"
+        return "keyword_brand_daily"
     if {"SKUID", "商品信息", "排名"} <= hs:
-        return "keyword_sku_rank_weekly"
+        return "keyword_sku_rank_daily"
     return None
 
 
@@ -222,7 +226,7 @@ def load_sku_daily(header, rows_iter, sheet_name, source_file):
     return pd.DataFrame.from_records(records) if records else None
 
 
-def load_keyword_brand_weekly(header, rows_iter, sheet_name, source_file):
+def load_keyword_brand_daily(header, rows_iter, sheet_name, source_file):
     names = [
         "日期", "年", "月", "周", "SPU", "词条性质", "品牌", "子品牌", "是否近14天", "排名", "关键词",
         "搜索人数", "搜索次数", "点击人数", "点击次数", "点击率", "成交金额", "成交单量", "成交转化率", "在线商品数",
@@ -235,11 +239,11 @@ def load_keyword_brand_weekly(header, rows_iter, sheet_name, source_file):
 
     records = []
     for row in rows_iter:
-        week_date = to_date(row[idx["日期"]])
-        if week_date is None:
+        row_date = to_date(row[idx["日期"]])
+        if row_date is None:
             continue
         records.append({
-            "week_date": week_date,
+            "date": row_date,
             "year": to_text(row[idx["年"]]),
             "month": to_text(row[idx["月"]]),
             "week": to_text(row[idx["周"]]),
@@ -265,7 +269,7 @@ def load_keyword_brand_weekly(header, rows_iter, sheet_name, source_file):
     return pd.DataFrame.from_records(records) if records else None
 
 
-def load_keyword_sku_rank_weekly(header, rows_iter, sheet_name, source_file):
+def load_keyword_sku_rank_daily(header, rows_iter, sheet_name, source_file):
     names = [
         "时间", "SPU", "是近14天", "品牌", "月", "周", "是否近14天", "排名",
         "SKUID", "商品信息", "品牌ID", "品牌名称", "点击人数", "点击次数", "成交单量", "成交金额",
@@ -278,11 +282,11 @@ def load_keyword_sku_rank_weekly(header, rows_iter, sheet_name, source_file):
 
     records = []
     for row in rows_iter:
-        week_date = to_date(row[idx["时间"]])
-        if week_date is None:
+        row_date = to_date(row[idx["时间"]])
+        if row_date is None:
             continue
         records.append({
-            "week_date": week_date,
+            "date": row_date,
             "spu": to_text(row[idx["SPU"]]),
             "is_last_14d_1": to_bool_cn(row[idx["是近14天"]]),
             "brand": to_text(row[idx["品牌"]]),
@@ -307,8 +311,8 @@ def load_keyword_sku_rank_weekly(header, rows_iter, sheet_name, source_file):
 LOADERS = {
     "funnel_daily": load_funnel_daily,
     "sku_daily": load_sku_daily,
-    "keyword_brand_weekly": load_keyword_brand_weekly,
-    "keyword_sku_rank_weekly": load_keyword_sku_rank_weekly,
+    "keyword_brand_daily": load_keyword_brand_daily,
+    "keyword_sku_rank_daily": load_keyword_sku_rank_daily,
 }
 
 

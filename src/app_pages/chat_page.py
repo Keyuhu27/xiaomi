@@ -16,7 +16,7 @@ SYSTEM_PROMPT = """你是一个销量数据分析助手，帮助用户查询和�
 关键区别：
 - sku_daily：全量商品每日销量快照，回答"今天/某天卖了多少"优先查这张表。
 - funnel_daily：重点新品（Turbo 系列等）的渠道级流量转化数据。
-- keyword_brand_weekly / keyword_sku_rank_weekly：行业关键词竞对监控，周度，数值多是脱敏区间的
+- keyword_brand_daily / keyword_sku_rank_daily：行业关键词竞对监控，每日数据，数值多是脱敏区间的
   估算值（字段名带 _est），不是精确数字，涉及这两张表的数字要提醒用户这是估算。
 
 回答问题时：

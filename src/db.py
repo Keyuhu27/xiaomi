@@ -9,9 +9,14 @@ DuckDB 连接与建表。
                             是回答"今天/某天某型号卖了多少"最核心的表
   - funnel_daily            重点新品（如 Redmi Turbo 系列）的每日全链路
                             流量转化数据，按渠道细分
-  - keyword_brand_weekly     行业关键词/品牌词条竞对监控（周度，数值多为
+  - keyword_brand_daily      行业关键词/品牌词条竞对监控（每日，数值多为
                             脱敏区间估算值）
-  - keyword_sku_rank_weekly   关键词/型号下的商品排名竞对监控（周度，同上）
+  - keyword_sku_rank_daily    关键词/型号下的商品排名竞对监控（每日，同上）
+
+（这两张表最初起名带"weekly"，是看到源数据有"周"这个字段就想当然认为是周度
+数据，后来用真实数据验证才发现"日期"字段其实每天都有一行、跨度以年计，是
+每日数据，"周"只是附带的上下文标签——已经改名，历史上如果看到哪里还叫
+keyword_brand_weekly/keyword_sku_rank_weekly，那是没改干净，以这里为准。）
 """
 import os
 from pathlib import Path
@@ -87,9 +92,9 @@ CREATE TABLE IF NOT EXISTS funnel_daily (
     imported_at TIMESTAMP DEFAULT current_timestamp
 );
 
-CREATE TABLE IF NOT EXISTS keyword_brand_weekly (
-    week_date DATE NOT NULL,        -- 该周对应的日期
-    year VARCHAR, month VARCHAR, week VARCHAR,
+CREATE TABLE IF NOT EXISTS keyword_brand_daily (
+    date DATE NOT NULL,
+    year VARCHAR, month VARCHAR, week VARCHAR,  -- week 是原表自带的周标签，不代表这张表是周度数据
     spu VARCHAR,
     entry_type VARCHAR,             -- 词条性质
     brand VARCHAR,
@@ -110,8 +115,8 @@ CREATE TABLE IF NOT EXISTS keyword_brand_weekly (
     imported_at TIMESTAMP DEFAULT current_timestamp
 );
 
-CREATE TABLE IF NOT EXISTS keyword_sku_rank_weekly (
-    week_date DATE NOT NULL,
+CREATE TABLE IF NOT EXISTS keyword_sku_rank_daily (
+    date DATE NOT NULL,
     spu VARCHAR,                    -- 型号分类，比如 K80、一加Ace5（含竞品）
     is_last_14d_1 BOOLEAN,          -- 原表里的"是近14天"列
     brand VARCHAR,
