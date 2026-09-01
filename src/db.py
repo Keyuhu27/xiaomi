@@ -3,10 +3,12 @@ DuckDB 连接与建表。
 
 数据库是一个本地文件（data/sales.duckdb），不需要单独起服务。
 
-数据库里有 4 张表，对应京东商智 4 类不同的报表（不是同一张"销量表"，
+数据库里有 5 张表，对应京东商智 5 类不同的报表（不是同一张"销量表"，
 详见 README）：
   - sku_daily              全量商品每日库存/出库快照，覆盖所有 SKU，
                             是回答"今天/某天某型号卖了多少"最核心的表
+  - sku_realtime            单品实时榜单，当天从 0 点到导出那一刻累计的
+                            流量/成交数据（还在累积中，不是当天最终数字）
   - funnel_daily            重点新品（如 Redmi Turbo 系列）的每日全链路
                             流量转化数据，按渠道细分
   - keyword_brand_daily      行业关键词/品牌词条竞对监控（每日，数值多为
@@ -51,6 +53,34 @@ CREATE TABLE IF NOT EXISTS sku_daily (
     sales_qty_14d BIGINT,
     sales_qty_28d BIGINT,
     sales_qty_30d BIGINT,
+    source_file VARCHAR,
+    imported_at TIMESTAMP DEFAULT current_timestamp
+);
+
+-- "实时榜单_SKU"报表：没有日期列，统计窗口只写在文件名里（形如
+-- ..._20260901_00_00_00_20260901_15_35_25.xlsx），导入时从文件名解析。
+-- 每个指标有 3 列：当前值 / 对比时间段的值(_cmp) / 涨跌幅(_chg，小数)。
+CREATE TABLE IF NOT EXISTS sku_realtime (
+    date DATE NOT NULL,             -- 这份快照所属的自然日（= window_start 的日期）
+    window_start TIMESTAMP,         -- 统计窗口起点，通常是当天 0 点
+    snapshot_at TIMESTAMP,          -- 导出这份快照的时间点（从文件名解析）
+    sku_id VARCHAR NOT NULL,
+    product_name VARCHAR,
+    pv BIGINT, pv_cmp BIGINT, pv_chg DOUBLE,                                       -- 浏览量
+    uv BIGINT, uv_cmp BIGINT, uv_chg DOUBLE,                                       -- 访客数
+    paying_customers BIGINT, paying_customers_cmp BIGINT, paying_customers_chg DOUBLE,  -- 成交人数
+    conversion_rate DOUBLE, conversion_rate_cmp DOUBLE, conversion_rate_chg DOUBLE,     -- 成交转化率
+    sales_qty BIGINT, sales_qty_cmp BIGINT, sales_qty_chg DOUBLE,                  -- 成交商品件数
+    order_qty BIGINT, order_qty_cmp BIGINT, order_qty_chg DOUBLE,                  -- 成交单量
+    sales_amount DOUBLE, sales_amount_cmp DOUBLE, sales_amount_chg DOUBLE,         -- 成交金额
+    aov DOUBLE, aov_cmp DOUBLE, aov_chg DOUBLE,                                    -- 成交客单价
+    follow_customers BIGINT, follow_customers_cmp BIGINT, follow_customers_chg DOUBLE,  -- 关注人数
+    add_cart_customers BIGINT, add_cart_customers_cmp BIGINT, add_cart_customers_chg DOUBLE,  -- 加购客户数
+    add_cart_qty BIGINT, add_cart_qty_cmp BIGINT, add_cart_qty_chg DOUBLE,         -- 加购商品件数
+    add_cart_rate DOUBLE, add_cart_rate_cmp DOUBLE, add_cart_rate_chg DOUBLE,      -- 加购转化率
+    add_cart_qty_positive BIGINT, add_cart_qty_positive_cmp BIGINT, add_cart_qty_positive_chg DOUBLE,  -- 加购商品件数（正向）
+    add_cart_qty_negative BIGINT, add_cart_qty_negative_cmp BIGINT, add_cart_qty_negative_chg DOUBLE,  -- 加购商品件数（负向）
+    uv_value DOUBLE, uv_value_cmp DOUBLE, uv_value_chg DOUBLE,                     -- UV价值
     source_file VARCHAR,
     imported_at TIMESTAMP DEFAULT current_timestamp
 );

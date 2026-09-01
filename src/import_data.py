@@ -7,9 +7,10 @@
     python src/import_data.py path/to/file.xlsx      # 只处理指定文件
 
 这个脚本不是按"文件"识别数据类型，而是打开工作簿后逐个 sheet 检查表头，
-自动识别出 4 种已知的京东商智报表类型（sku_daily / funnel_daily /
-keyword_brand_daily / keyword_sku_rank_daily，具体字段含义见 README 和
-src/db.py 里的表结构注释），认不出的 sheet（汇总、透视表之类）会跳过。
+自动识别出 5 种已知的京东商智报表类型（sku_daily / sku_realtime /
+funnel_daily / keyword_brand_daily / keyword_sku_rank_daily，具体字段含义
+见 README 和 src/db.py 里的表结构注释），认不出的 sheet（汇总、透视表之类）
+会跳过。
 
 日常使用流程：每天把京东商智下载的新数据粘贴进 Excel 模板对应的"数据源"
 sheet 里（和你原来手工维护模板的习惯一样），然后把整份模板文件丢进
@@ -17,7 +18,8 @@ data/inbox/ 运行本脚本即可——重复导入同一天/同一系列/同一
 整体替换，不会产生重复行。
 """
 import argparse
-from datetime import timedelta
+import re
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -40,6 +42,7 @@ PROCESSED_DIR = INBOX_DIR / "processed"
 PARTITION_COL = {
     "funnel_daily": ["series_code", "date"],
     "sku_daily": ["sales_date"],                # 按销售日期整体替换
+    "sku_realtime": ["date"],                   # 同一天重新导出，用最新快照整体替换
     "keyword_brand_daily": ["date"],
     "keyword_sku_rank_daily": ["date"],
 }
@@ -68,6 +71,50 @@ _FUNNEL_METRIC_FIELDS = {
     "成交子单量": "sales_qty",
 }
 
+# "实时榜单_SKU"报表没有日期列，统计窗口只写在文件名里，形如
+# ..._20260901_00_00_00_20260901_15_35_25.xlsx（窗口起点_导出时刻）。
+_REALTIME_FILENAME_RE = re.compile(
+    r"(\d{8})_(\d{2})_(\d{2})_(\d{2})_(\d{8})_(\d{2})_(\d{2})_(\d{2})"
+)
+
+# 每个指标在表里是 3 列：当前值 / "指标-对比时间"(对比期的值) / "指标-较对比时间"(涨跌幅%)
+_REALTIME_METRIC_FIELDS = {
+    "浏览量": "pv",
+    "访客数": "uv",
+    "成交人数": "paying_customers",
+    "成交转化率": "conversion_rate",
+    "成交商品件数": "sales_qty",
+    "成交单量": "order_qty",
+    "成交金额": "sales_amount",
+    "成交客单价": "aov",
+    "关注人数": "follow_customers",
+    "加购客户数": "add_cart_customers",
+    "加购商品件数": "add_cart_qty",
+    "加购转化率": "add_cart_rate",
+    "加购商品件数（正向）": "add_cart_qty_positive",
+    "加购商品件数（负向）": "add_cart_qty_negative",
+    "UV价值": "uv_value",
+}
+_REALTIME_INT_METRICS = {
+    "pv", "uv", "paying_customers", "sales_qty", "order_qty",
+    "follow_customers", "add_cart_customers", "add_cart_qty",
+    "add_cart_qty_positive", "add_cart_qty_negative",
+}
+
+
+def _parse_realtime_window(filename: str):
+    """从文件名解析"实时榜单"报表的统计窗口（窗口起点、导出时刻）。解析不出来返回 (None, None)。"""
+    m = _REALTIME_FILENAME_RE.search(filename)
+    if not m:
+        return None, None
+    d1, h1, mi1, s1, d2, h2, mi2, s2 = m.groups()
+    try:
+        window_start = datetime.strptime(f"{d1}{h1}{mi1}{s1}", "%Y%m%d%H%M%S")
+        snapshot_at = datetime.strptime(f"{d2}{h2}{mi2}{s2}", "%Y%m%d%H%M%S")
+    except ValueError:
+        return None, None
+    return window_start, snapshot_at
+
 
 def _raw(v):
     """保留原始文本，但把 pandas 读表格时整列被转成 float 导致的'8073.0'这种
@@ -85,6 +132,8 @@ def detect_report_type(header: list) -> str | None:
         return "funnel_daily"
     if {"SKU", "库存件数", "昨日出库商品件数", "一级类目"} <= hs:
         return "sku_daily"
+    if {"浏览量", "成交客单价", "加购商品件数（正向）"} <= hs:
+        return "sku_realtime"
     if {"关键词", "在线商品数", "搜索人数"} <= hs:
         return "keyword_brand_daily"
     if {"SKUID", "商品信息", "排名"} <= hs:
@@ -226,6 +275,55 @@ def load_sku_daily(header, rows_iter, sheet_name, source_file):
     return pd.DataFrame.from_records(records) if records else None
 
 
+def load_sku_realtime(header, rows_iter, sheet_name, source_file):
+    """
+    "实时榜单_SKU"报表：单品当天从 0 点到导出那一刻累计的流量/成交数据，
+    sheet 里没有日期列——统计窗口只写在文件名里，所以文件名不能改（保留
+    京东商智原始的 ..._20260901_00_00_00_20260901_15_35_25.xlsx 这种格式）。
+    """
+    window_start, snapshot_at = _parse_realtime_window(source_file)
+    if window_start is None:
+        print(
+            f"  [跳过] sheet '{sheet_name}' 无法从文件名 '{source_file}' 解析统计窗口，"
+            f"文件名需要保留京东商智原始格式（形如 "
+            f"..._20260901_00_00_00_20260901_15_35_25.xlsx），改过名字的话请改回来再传"
+        )
+        return None
+
+    names = ["SKU", "商品名称"]
+    try:
+        idx = {name: header.index(name) for name in names}
+        metric_idx = {
+            field: (header.index(cn), header.index(f"{cn}-对比时间"), header.index(f"{cn}-较对比时间"))
+            for cn, field in _REALTIME_METRIC_FIELDS.items()
+        }
+    except ValueError as e:
+        print(f"  [跳过] sheet '{sheet_name}' 缺少必要列: {e}")
+        return None
+
+    records = []
+    for row in rows_iter:
+        sku_id = to_id_str(row[idx["SKU"]])
+        if sku_id is None:
+            continue
+        rec = {
+            "date": window_start.date(),
+            "window_start": window_start,
+            "snapshot_at": snapshot_at,
+            "sku_id": sku_id,
+            "product_name": to_text(row[idx["商品名称"]]),
+            "source_file": source_file,
+        }
+        for field, (raw_i, cmp_i, chg_i) in metric_idx.items():
+            conv = to_int if field in _REALTIME_INT_METRICS else to_float
+            rec[field] = conv(row[raw_i])
+            rec[f"{field}_cmp"] = conv(row[cmp_i])
+            rec[f"{field}_chg"] = to_float(row[chg_i])
+        records.append(rec)
+
+    return pd.DataFrame.from_records(records) if records else None
+
+
 def load_keyword_brand_daily(header, rows_iter, sheet_name, source_file):
     names = [
         "日期", "年", "月", "周", "SPU", "词条性质", "品牌", "子品牌", "是否近14天", "排名", "关键词",
@@ -311,6 +409,7 @@ def load_keyword_sku_rank_daily(header, rows_iter, sheet_name, source_file):
 LOADERS = {
     "funnel_daily": load_funnel_daily,
     "sku_daily": load_sku_daily,
+    "sku_realtime": load_sku_realtime,
     "keyword_brand_daily": load_keyword_brand_daily,
     "keyword_sku_rank_daily": load_keyword_sku_rank_daily,
 }
